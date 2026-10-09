@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1260 770" width="1260" height="770" role="img" aria-label="Architecture: a visitor's browser reaches an internet gateway and an internet-facing Application Load Balancer that spans public subnets in two Availability Zones. The load balancer sends traffic to EC2 web servers in private subnets in both zones, managed by an Auto Scaling group. CloudWatch alarms notify an SNS topic that emails you.">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#141922"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:#141922}
+    .t{font-size:14px;font-weight:700}
+    .s{font-size:12px}
+    .xs{font-size:11px;fill:#586173}
+    .m{fill:#586173}
+    .c{text-anchor:middle}
+  </style>
+  <rect width="1260" height="770" fill="#FFFFFF"/>
+
+  <text x="30" y="48" style="font-size:18px;font-weight:800">HA web app on AWS</text>
+
+  <!-- visitor -->
+  <rect x="340" y="22" width="180" height="42" rx="21" fill="#F1F3F7" stroke="#586173"/>
+  <text x="430" y="48" class="t c">Visitor's browser</text>
+  <line x1="430" y1="64" x2="430" y2="127" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="440" y="90" class="s m">HTTP :80</text>
+
+  <!-- region and VPC -->
+  <rect x="30" y="100" width="1030" height="640" rx="14" fill="none" stroke="#586173" stroke-width="1.4" stroke-dasharray="8 6"/>
+  <text x="46" y="124" class="t m">AWS Region · us-east-1</text>
+  <rect x="55" y="150" width="750" height="570" rx="12" fill="#FBFCFE" stroke="#141922" stroke-width="1.4"/>
+  <text x="71" y="174" class="t">VPC · 10.0.0.0/16</text>
+
+  <!-- internet gateway -->
+  <rect x="360" y="130" width="140" height="40" rx="8" fill="#FFFFFF" stroke="#141922" stroke-width="1.4"/>
+  <text x="430" y="155" class="s c" style="font-weight:700">Internet gateway</text>
+  <line x1="430" y1="170" x2="430" y2="265" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- Availability Zones -->
+  <rect x="75" y="195" width="345" height="505" rx="12" fill="none" stroke="#B3BCCB" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="91" y="216" class="s m" style="font-weight:700">Availability Zone A</text>
+  <rect x="440" y="195" width="345" height="505" rx="12" fill="none" stroke="#B3BCCB" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="456" y="216" class="s m" style="font-weight:700">Availability Zone B</text>
+
+  <!-- public subnets -->
+  <rect x="95" y="228" width="305" height="124" rx="10" fill="#E7ECFC" stroke="#3157D5" stroke-width="1.2"/>
+  <text x="109" y="248" class="s" style="font-weight:700;fill:#3157D5">Public subnet · 10.0.0.0/24</text>
+  <rect x="460" y="228" width="305" height="124" rx="10" fill="#E7ECFC" stroke="#3157D5" stroke-width="1.2"/>
+  <text x="474" y="248" class="s" style="font-weight:700;fill:#3157D5">Public subnet · 10.0.1.0/24</text>
+
+  <!-- load balancer spanning both AZs -->
+  <rect x="115" y="268" width="630" height="62" rx="10" fill="#3157D5"/>
+  <text x="430" y="294" class="c" style="font-size:15px;font-weight:800;fill:#FFFFFF">Application Load Balancer</text>
+  <text x="430" y="315" class="s c" style="fill:#FFFFFF">internet-facing · listener HTTP :80 · a node in each AZ</text>
+
+  <!-- Auto Scaling group spanning both private subnets -->
+  <rect x="90" y="372" width="680" height="318" rx="12" fill="none" stroke="#8A5508" stroke-width="1.6" stroke-dasharray="7 5"/>
+
+  <!-- private subnets -->
+  <rect x="105" y="392" width="295" height="228" rx="10" fill="#DCF0E8" stroke="#1D6B57" stroke-width="1.2"/>
+  <rect x="460" y="392" width="295" height="228" rx="10" fill="#DCF0E8" stroke="#1D6B57" stroke-width="1.2"/>
+  <text x="119" y="608" class="s" style="font-weight:700;fill:#1D6B57">Private subnet · 10.0.10.0/24</text>
+  <text x="474" y="608" class="s" style="font-weight:700;fill:#1D6B57">Private subnet · 10.0.11.0/24</text>
+
+  <!-- web servers -->
+  <rect x="135" y="428" width="235" height="124" rx="10" fill="#FFFFFF" stroke="#1D6B57" stroke-width="1.4"/>
+  <text x="252" y="456" class="t c">EC2 web server</text>
+  <text x="252" y="477" class="s c">t3.micro · Amazon Linux 2023</text>
+  <text x="252" y="496" class="s c">IMDSv2 · encrypted EBS</text>
+  <text x="252" y="522" class="xs c">web-sg: HTTP only from alb-sg</text>
+
+  <rect x="490" y="428" width="235" height="124" rx="10" fill="#FFFFFF" stroke="#1D6B57" stroke-width="1.4"/>
+  <text x="607" y="456" class="t c">EC2 web server</text>
+  <text x="607" y="477" class="s c">t3.micro · Amazon Linux 2023</text>
+  <text x="607" y="496" class="s c">IMDSv2 · encrypted EBS</text>
+  <text x="607" y="522" class="xs c">web-sg: HTTP only from alb-sg</text>
+
+  <!-- load balancer to targets -->
+  <line x1="252" y1="330" x2="252" y2="425" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="607" y1="330" x2="607" y2="425" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="262" y="364" class="s m">health checks: /health</text>
+
+  <text x="106" y="643" style="font-size:13px;font-weight:800;fill:#8A5508">Auto Scaling group · min 2 · desired 2 · max 4</text>
+  <text x="106" y="661" class="s">ELB health checks replace failed servers</text>
+  <text x="106" y="678" class="s">Scales on CPU, target 50%</text>
+
+  <!-- monitoring -->
+  <rect x="830" y="228" width="210" height="84" rx="10" fill="#FFFFFF" stroke="#586173" stroke-width="1.4"/>
+  <text x="935" y="256" class="t c">CloudWatch alarms</text>
+  <text x="935" y="277" class="s c">unhealthy hosts &gt; 0</text>
+  <text x="935" y="296" class="s c">average CPU &gt; 80%</text>
+  <line x1="935" y1="312" x2="935" y2="369" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <rect x="830" y="372" width="210" height="60" rx="10" fill="#FFFFFF" stroke="#586173" stroke-width="1.4"/>
+  <text x="935" y="398" class="t c">SNS topic</text>
+  <text x="935" y="419" class="s c">email subscription</text>
+  <line x1="1040" y1="402" x2="1087" y2="402" stroke="#141922" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <rect x="1090" y="382" width="150" height="40" rx="20" fill="#F1F3F7" stroke="#586173"/>
+  <text x="1165" y="407" class="t c">Your email</text>
+
+  <!-- security summary -->
+  <rect x="830" y="470" width="210" height="180" rx="10" fill="#F1F3F7" stroke="#D9DEE7"/>
+  <text x="846" y="496" class="t">Security</text>
+  <text x="846" y="520" class="s">alb-sg: HTTP 80 from anywhere</text>
+  <text x="846" y="541" class="s">web-sg: HTTP 80 from alb-sg</text>
+  <text x="846" y="562" class="s">Servers in private subnets</text>
+  <text x="846" y="583" class="s">No internet route, no NAT</text>
+  <text x="846" y="604" class="s">No SSH keys, no admin ports</text>
+  <text x="846" y="625" class="s">IMDSv2 only · encrypted EBS</text>
+</svg>

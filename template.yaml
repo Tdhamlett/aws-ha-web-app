@@ -1,0 +1,565 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Highly available web app: an internet-facing Application Load Balancer in two
+  public subnets, sending traffic to an Auto Scaling group of EC2 web servers in
+  two private subnets across two Availability Zones, with health checks,
+  target tracking scaling, and CloudWatch alarms that email you through SNS.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address for alarm notifications. Confirm the subscription email AWS sends you.
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    ConstraintDescription: Enter a valid email address.
+
+  DemoToken:
+    Type: String
+    NoEcho: true
+    Description: >-
+      A short password (8-40 letters, numbers, or dashes) that protects the
+      /fail demo page, which makes one server fail its health checks on purpose.
+    MinLength: 8
+    MaxLength: 40
+    AllowedPattern: "^[A-Za-z0-9-]+$"
+    ConstraintDescription: Use 8-40 letters, numbers, or dashes.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: EC2 instance type for the web servers.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI, looked up from AWS Systems Manager Parameter Store.
+
+Resources:
+  # ---------- Network: one VPC, a public and a private subnet in each of two AZs ----------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-b"
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-a"
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-b"
+
+  # Public subnets send internet-bound traffic to the internet gateway.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-rt"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private subnets get only the VPC's local route: no internet in or out.
+  # Cost-conscious lab choice: no NAT gateway. The web app uses only software
+  # that ships with Amazon Linux 2023, so the servers never need the internet.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-rt"
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------- Security groups: the internet reaches only the ALB; only the ALB reaches the servers ----------
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from the internet to the load balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP to the web servers only from the load balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          Description: HTTP from the load balancer only
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-web-sg"
+
+  # ---------- Load balancer, target group, and listener ----------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-web-tg"
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+
+  # ---------- Web servers: launch template + Auto Scaling group ----------
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+          - !Ref WebServerSecurityGroup
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required          # IMDSv2 only
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              Encrypted: true           # encrypted at rest with the default AWS managed key
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${AWS::StackName}-web"
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub "${AWS::StackName}-web-root"
+        UserData:
+          Fn::Base64:
+            Fn::Join:
+              - ""
+              - - !Sub
+                  - |
+                    #!/bin/bash
+                    set -euo pipefail
+                    mkdir -p /etc/webapp /opt/webapp
+                    cat > /etc/webapp/env <<'ENV'
+                    DEMO_TOKEN=${DemoToken}
+                    AZ_LIST=${AzA},${AzB}
+                    ENV
+                    chmod 600 /etc/webapp/env
+                  - AzA: !GetAtt PrivateSubnetA.AvailabilityZone
+                    AzB: !GetAtt PrivateSubnetB.AvailabilityZone
+                - |
+                  cat > /opt/webapp/app.py <<'PY'
+                  #!/usr/bin/env python3
+                  """Demo web app for the highly available web app project.
+
+                  Shows which server and Availability Zone answered each request, so you
+                  can watch the load balancer spread traffic across both AZs.
+                  Uses only the Python standard library that ships with Amazon Linux 2023.
+                  """
+                  import html
+                  import os
+                  import time
+                  import urllib.request
+                  from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+                  from urllib.parse import parse_qs, urlparse
+
+                  IMDS = "http://169.254.169.254/latest"
+                  PORT = int(os.environ.get("PORT", "80"))
+                  TOKEN = os.environ.get("DEMO_TOKEN", "")
+                  AZ_LIST = [a for a in os.environ.get("AZ_LIST", "").split(",") if a]
+                  STARTED = time.time()
+                  STATE = {"failing": False, "served": 0}
+                  COLORS = {"a": "#3157d5", "b": "#0f8a6c", "c": "#b4570d", "d": "#8a3fd1", "e": "#b83227", "f": "#2c7a7b"}
+
+
+                  def instance_metadata():
+                      """Read this server's details from the instance metadata service (IMDSv2)."""
+                      try:
+                          req = urllib.request.Request(IMDS + "/api/token", method="PUT",
+                                                       headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"})
+                          token = urllib.request.urlopen(req, timeout=2).read().decode()
+
+                          def get(path):
+                              r = urllib.request.Request(IMDS + "/meta-data/" + path,
+                                                         headers={"X-aws-ec2-metadata-token": token})
+                              return urllib.request.urlopen(r, timeout=2).read().decode()
+
+                          return {"id": get("instance-id"), "az": get("placement/availability-zone"),
+                                  "ip": get("local-ipv4"), "type": get("instance-type")}
+                      except Exception:
+                          return {"id": "unknown", "az": "unknown", "ip": "unknown", "type": "unknown"}
+
+
+                  META = instance_metadata()
+
+
+                  def color(az):
+                      return COLORS.get(az[-1:], "#5b6475")
+
+
+                  STYLE = """
+                  :root{--ink:#141922;--muted:#5b6475;--paper:#f3f5f9;--card:#fff;--rule:#d9dee7}
+                  *{box-sizing:border-box}
+                  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--paper);color:var(--ink);line-height:1.5}
+                  main{max-width:46rem;margin:0 auto;padding:32px 20px 48px;display:flex;flex-direction:column;gap:22px}
+                  .eyebrow{font:600 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+                  h1{margin:6px 0 0;font-size:clamp(2.1rem,7.5vw,3.4rem);line-height:1.05;letter-spacing:-.02em}
+                  h1 span{color:var(--az)}
+                  p{margin:0}
+                  .lead{font-size:1.1rem;color:var(--muted);margin-top:8px}
+                  .azs{display:grid;grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:12px}
+                  .az{border:2px dashed var(--rule);border-radius:16px;padding:16px;background:var(--card);display:flex;flex-direction:column;gap:8px;min-height:7.5rem}
+                  .az b{font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+                  .az.on{border:3px solid var(--az)}
+                  .az.on b{color:var(--az)}
+                  .srv{display:flex;align-items:center;gap:8px;font-weight:600}
+                  .dot{width:12px;height:12px;border-radius:50%;background:var(--rule);flex:none}
+                  .az.on .dot{background:var(--az)}
+                  .az:not(.on) .srv{color:var(--muted);font-weight:400}
+                  .card{background:var(--card);border:1px solid var(--rule);border-radius:16px;padding:16px 18px}
+                  dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:8px 18px}
+                  dt{color:var(--muted)}
+                  dd{margin:0;font:500 15px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+                  .fail{background:#fbe6e2;border:1px solid #b83227;color:#7d1f14;border-radius:12px;padding:12px 14px;font-weight:600}
+                  .note{font-size:.95rem;color:var(--muted)}
+                  a{color:var(--az)}
+                  """
+
+
+                  def page(title, body, az, refresh):
+                      meta_refresh = '<meta http-equiv="refresh" content="3">' if refresh else ""
+                      return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                              '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                              + meta_refresh + "<title>" + html.escape(title) + "</title><style>" + STYLE
+                              + "</style></head><body style=\"--az:" + color(az) + "\"><main>" + body
+                              + "</main></body></html>")
+
+
+                  def home(paused):
+                      e = html.escape
+                      az = META["az"]
+                      boxes = []
+                      for name in (AZ_LIST or [az]):
+                          on = name == az
+                          state = "This server answered" if on else "Standing by"
+                          boxes.append('<div class="az' + (" on" if on else "") + '" style="--az:' + color(name) + '">'
+                                       + "<b>" + e(name) + '</b><div class="srv"><span class="dot"></span>'
+                                       + e(state) + "</div>"
+                                       + ("<div><code>" + e(META["id"]) + "</code></div>" if on else "")
+                                       + "</div>")
+                      fail = ('<p class="fail">This server is failing its health checks on purpose. '
+                              "The load balancer will stop sending it traffic, and Auto Scaling will replace it.</p>"
+                              if STATE["failing"] else "")
+                      uptime = int((time.time() - STARTED) // 60)
+                      body = ('<div><div class="eyebrow">Highly available web app · ALB + Auto Scaling</div>'
+                              "<h1>Served from <span>" + e(az) + "</span></h1>"
+                              '<p class="lead">The Application Load Balancer sent this request to one of the web servers. '
+                              "Each refresh is a new request, so watch it move between Availability Zones.</p></div>"
+                              + fail + '<div class="azs">' + "".join(boxes) + "</div>"
+                              '<div class="card"><dl>'
+                              "<dt>Instance</dt><dd>" + e(META["id"]) + "</dd>"
+                              "<dt>Availability Zone</dt><dd>" + e(az) + "</dd>"
+                              "<dt>Private IP</dt><dd>" + e(META["ip"]) + "</dd>"
+                              "<dt>Instance type</dt><dd>" + e(META["type"]) + "</dd>"
+                              "<dt>Requests answered</dt><dd>" + str(STATE["served"]) + "</dd>"
+                              "<dt>Running for</dt><dd>" + str(uptime) + " min</dd>"
+                              "</dl></div>"
+                              '<p class="note">'
+                              + ('Refreshing is paused. <a href="/">Resume</a>.' if paused
+                                 else 'This page refreshes every 3 seconds. <a href="/?pause">Pause it</a> for screenshots.')
+                              + " The load balancer checks each server at <code>/health</code>.</p>")
+                      return page(az + " · HA web app", body, az, not paused)
+
+
+                  class Handler(BaseHTTPRequestHandler):
+                      server_version = "ha-web-app"
+                      sys_version = ""
+
+                      def do_GET(self):
+                          url = urlparse(self.path)
+                          query = parse_qs(url.query, keep_blank_values=True)
+                          if url.path == "/health":
+                              if STATE["failing"]:
+                                  self.send(503, "text/plain", b"failing on purpose (demo)\n")
+                              else:
+                                  self.send(200, "text/plain", b"ok\n")
+                          elif url.path == "/":
+                              STATE["served"] += 1
+                              self.send(200, "text/html; charset=utf-8", home("pause" in query).encode())
+                          elif url.path == "/fail":
+                              if TOKEN and query.get("token", [""])[0] == TOKEN:
+                                  STATE["failing"] = True
+                                  body = ("<div><div class=\"eyebrow\">Demo: application failure</div>"
+                                          "<h1>Failing <span>on purpose</span></h1></div>"
+                                          '<p class="fail">Server ' + html.escape(META["id"]) + " in " + html.escape(META["az"])
+                                          + " now answers its health checks with an error. The server itself keeps running.</p>"
+                                          '<p class="lead">Watch the target group mark it unhealthy, then Auto Scaling '
+                                          "terminate it and launch a replacement.</p>")
+                                  self.send(200, "text/html; charset=utf-8", page("Failing on purpose", body, META["az"], False).encode())
+                              else:
+                                  self.send(403, "text/plain", b"Wrong or missing token.\n")
+                          else:
+                              self.send(404, "text/plain", b"Not found.\n")
+
+                      def send(self, code, ctype, body):
+                          self.send_response(code)
+                          self.send_header("Content-Type", ctype)
+                          self.send_header("Content-Length", str(len(body)))
+                          self.send_header("Cache-Control", "no-store")
+                          self.end_headers()
+                          self.wfile.write(body)
+
+                      def log_message(self, *args):
+                          pass
+
+
+                  if __name__ == "__main__":
+                      ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+                  PY
+
+                  cat > /etc/systemd/system/webapp.service <<'UNIT'
+                  [Unit]
+                  Description=Demo web app for the HA web app project
+                  After=network-online.target
+                  Wants=network-online.target
+
+                  [Service]
+                  EnvironmentFile=/etc/webapp/env
+                  ExecStart=/usr/bin/python3 /opt/webapp/app.py
+                  Restart=always
+                  DynamicUser=yes
+                  AmbientCapabilities=CAP_NET_BIND_SERVICE
+                  NoNewPrivileges=yes
+
+                  [Install]
+                  WantedBy=multi-user.target
+                  UNIT
+
+                  systemctl daemon-reload
+                  systemctl enable --now webapp.service
+
+  WebAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: HttpListener
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      TargetGroupARNs:
+        - !Ref WebTargetGroup
+      HealthCheckType: ELB              # replace servers the load balancer marks unhealthy
+      HealthCheckGracePeriod: 120
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-web"
+          PropagateAtLaunch: true
+
+  CpuTargetTrackingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+  # ---------- Monitoring: CloudWatch alarms that email you through SNS ----------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: HA web app alerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A web server is failing its load balancer health checks.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt WebTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  HighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Average CPU across the web servers stayed above 80% for 10 minutes.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WebAutoScalingGroup
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  WebsiteURL:
+    Description: Open this in a browser to see the app.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+  FailDemoURL:
+    Description: Replace YOUR_TOKEN with your DemoToken to make one server fail its health checks on purpose.
+    Value: !Sub "http://${LoadBalancer.DNSName}/fail?token=YOUR_TOKEN"
+  AutoScalingGroupName:
+    Description: Find this group in the EC2 console under Auto Scaling Groups.
+    Value: !Ref WebAutoScalingGroup
+  TargetGroupName:
+    Description: Find this in the EC2 console under Target Groups to watch health checks.
+    Value: !GetAtt WebTargetGroup.TargetGroupName
