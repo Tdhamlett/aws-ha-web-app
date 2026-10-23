@@ -5,6 +5,7 @@ Use the app's `?pause` link before taking app screenshots so the page stops refr
 
 | File | What to capture |
 |---|---|
+| `00-quota-error.png` | Optional: the vCPU quota error from a failed first deploy, if you hit one. It makes a good "problem I solved" slide. |
 | `01-stack-complete.png` | CloudFormation stack showing **CREATE_COMPLETE** and the **Outputs** tab |
 | `02-app-az-a.png` | The app page served from the first Availability Zone |
 | `03-app-az-b.png` | The app page served from the second Availability Zone |

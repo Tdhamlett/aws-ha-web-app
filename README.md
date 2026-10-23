@@ -58,7 +58,21 @@ A three-hour session costs about $0.20. On a new account's Free plan, usage come
 
 ## Deploy
 
-**You need:** an AWS account, an IAM user with admin access (not the root user), and the Region set to **US East (N. Virginia) us-east-1**.
+**You need:**
+- An AWS account and an IAM user with admin access (not the root user).
+- The Region set to **US East (N. Virginia) us-east-1**.
+- An EC2 vCPU quota of at least **6** in us-east-1. New accounts can start lower, so check it first.
+
+### Before you deploy: check your EC2 vCPU quota
+
+Each t3.micro uses 2 vCPUs. Two servers run all the time, and when Auto Scaling replaces a failed server, the new one can start launching before the old one is gone. That needs room for 3 servers, or 6 vCPUs. A new account's quota can be as low as 1 vCPU, which can't launch even one server.
+
+1. Open **Service Quotas** in us-east-1, choose **AWS services**, and open **Amazon Elastic Compute Cloud (Amazon EC2)**.
+2. Find **Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances** and check its applied value.
+3. If it's under 6, choose **Request increase at account-level**, enter `6`, and choose **Request**.
+4. Track the request on the **Request history** tab. Small increases are often approved automatically. Others become an AWS Support case and can take a few days.
+
+### Create the stack
 
 1. Download [`template.yaml`](template.yaml).
 2. Open the **CloudFormation** console and choose **Create stack**, then **With new resources (standard)**.
@@ -91,7 +105,7 @@ During test 2, the **unhealthy hosts** alarm fires and emails you, then sends an
 Screenshot: `07-alarm-email.png`.
 
 ### 4. Scale out by hand (optional)
-In the Auto Scaling group, choose **Edit** and set **Desired capacity** to 3. A third server launches and starts showing up on the page. Set it back to 2 when you're done.
+In the Auto Scaling group, choose **Edit** and set **Desired capacity** to 3. A third server launches and starts showing up on the page. Three servers use the full 6-vCPU quota. Set it back to 2 when you're done.
 
 ## Results
 
@@ -113,6 +127,14 @@ _Fill this in after you deploy and test. Add your screenshots to [`docs/screensh
 3. Check the EC2 console: no running instances and no load balancers from this project.
 4. Check **Billing and Cost Management** the next day.
 
+## Troubleshooting
+
+| What you see | Why | Fix |
+|---|---|---|
+| The stack sits at **CREATE_IN_PROGRESS** on `WebAutoScalingGroup` for more than 10 minutes. | Auto Scaling can't launch the servers. CloudFormation keeps waiting for the group to reach two servers, then gives up and rolls back, which can take about half an hour. | Don't wait it out. In the EC2 console, open **Auto Scaling Groups**, then your group's **Activity** tab. A failed launch there shows the exact reason within minutes. |
+| `WebAutoScalingGroup` fails with *"Group did not stabilize… You have requested more vCPU capacity than your current vCPU limit of 1 allows…"* | The account's EC2 vCPU quota is too low. A t3.micro needs 2 vCPUs. | [Request an increase](#before-you-deploy-check-your-ec2-vcpu-quota). The rollback deletes everything the stack created, so nothing keeps running. Delete the stack in **ROLLBACK_COMPLETE**, wait for approval, then create it again. |
+| The review page says **DemoToken** "failed to satisfy constraint." | The token must be 8–40 letters, numbers, or dashes. | Type a new one using only those characters. Typing it avoids hidden spaces that pasting can add. |
+
 ## What I'd add next
 
 - **HTTPS:** a domain in Route 53, a certificate from ACM, and an HTTP-to-HTTPS redirect on the load balancer.
@@ -125,7 +147,7 @@ _Fill this in after you deploy and test. Add your screenshots to [`docs/screensh
 | Domain | Topics in this project |
 |---|---|
 | 1 · Secure architectures | Private subnets, security group chaining, IMDSv2, encrypted EBS |
-| 2 · Resilient architectures | Multi-AZ design, ELB health checks, Auto Scaling replacement |
+| 2 · Resilient architectures | Multi-AZ design, ELB health checks, Auto Scaling replacement, service quotas (EC2 vCPU limits) |
 | 3 · High-performing architectures | Load balancing, target tracking scaling |
 | 4 · Cost-optimized architectures | Skipping the NAT gateway, right-sized instances, teardown |
 
